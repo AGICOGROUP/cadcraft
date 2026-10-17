@@ -15,6 +15,12 @@ languages while running. A Chinese interface requires a suitable installed font.
 On Windows the viewer tries the system YaHei, JhengHei and SimHei fonts; it never
 ships copies of those fonts.
 
+The chrome follows CADCraft's slate palette, typography, compact controls and
+24-pixel line-icon geometry. Toolbar controls use the same `craft-ui` icon-button
+component as the editor; no editing engine is loaded. The window, executable and
+desktop shortcut use the existing MIT/Apache-licensed CADCraft application icon
+unchanged. Restricted ArtCraft marks from `docs/brand` are not bundled.
+
 ## Reviewing drawings
 
 - Open (`Ctrl+O`) or drop a drawing into the window. One drawing per window.

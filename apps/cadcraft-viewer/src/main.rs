@@ -3,12 +3,15 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::todo, clippy::unimplemented, clippy::unreachable)]
 mod camera;
 mod document;
+mod icons;
+mod theme;
 mod worker;
 
 use cadcraft_geom::{Bounds2, Vec2};
 use cadcraft_render::raster::View;
 use camera::Camera;
 use egui::{Color32, Pos2, Rect, Vec2 as ScreenVec};
+use icons::Icon;
 use std::{
     path::PathBuf,
     sync::mpsc::{Receiver, Sender},
@@ -53,6 +56,7 @@ struct Viewer {
     capture: Option<PathBuf>,
     capture_sent: bool,
     capture_since: Instant,
+    app_mark: Option<egui::TextureHandle>,
 }
 
 impl Viewer {
@@ -67,11 +71,14 @@ impl Viewer {
             }
         }
         cc.egui_ctx.set_fonts(fonts);
-        cc.egui_ctx.set_visuals(egui::Visuals::light());
-        let mut style = (*cc.egui_ctx.style_of(egui::Theme::Light)).clone();
-        style.spacing.item_spacing = ScreenVec::new(10.0, 8.0);
-        style.spacing.button_padding = ScreenVec::new(12.0, 7.0);
-        cc.egui_ctx.set_style_of(egui::Theme::Light, style);
+        theme::apply(&cc.egui_ctx);
+        let app_mark = theme::app_icon().map(|icon| {
+            cc.egui_ctx.load_texture(
+                "cadcraft-app-icon",
+                egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba),
+                egui::TextureOptions::LINEAR,
+            )
+        });
         let (jobs, events, cancel) = worker::spawn(cc.egui_ctx.clone());
         let zh = language.unwrap_or_else(|| {
             std::env::var("CADCRAFT_VIEWER_LANGUAGE")
@@ -111,6 +118,7 @@ impl Viewer {
             capture,
             capture_sent: false,
             capture_since: Instant::now(),
+            app_mark,
         };
         if let Some(path) = path {
             app.open(path);
@@ -260,28 +268,31 @@ impl eframe::App for Viewer {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let zh = self.zh;
-        egui::Panel::top("toolbar").frame(egui::Frame::new().fill(Color32::from_rgb(247, 248, 250)).inner_margin(12.0)).show(ui, |ui| {
+        egui::Panel::top("toolbar").frame(egui::Frame::new().fill(theme::CHROME).inner_margin(8.0)).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.strong(text(zh, "清阅 CAD", "CADCraft Viewer"));
+                if let Some(mark) = &self.app_mark {
+                    ui.image((mark.id(), egui::vec2(26.0, 26.0)));
+                }
+                ui.strong("CADCraft Viewer");
                 ui.separator();
-                if ui.button(text(zh, "打开图纸", "Open")).on_hover_text("Ctrl+O / DWG, DXF, DWT").clicked() {
+                if icons::button(ui, Icon::Open, text(zh, "打开图纸", "Open"), false, true).on_hover_text("Ctrl+O / DWG, DXF, DWT").clicked() {
                     self.pick_open();
                 }
-                if ui.add_enabled(self.loaded, egui::Button::new(text(zh, "适应窗口", "Fit"))).on_hover_text("Home / Double click").clicked() {
+                if icons::button(ui, Icon::Fit, text(zh, "适应窗口", "Fit"), false, self.loaded).on_hover_text("Home / Double click").clicked() {
                     self.fit = true;
                 }
-                if ui.selectable_label(self.show_layers, text(zh, "图层", "Layers")).clicked() {
+                if icons::button(ui, Icon::Layers, text(zh, "图层", "Layers"), self.show_layers, true).clicked() {
                     self.show_layers = !self.show_layers;
                 }
-                if ui.add_enabled(self.loaded, egui::Button::selectable(self.measuring, text(zh, "测距", "Measure"))).clicked() {
+                if icons::button(ui, Icon::Measure, text(zh, "测距", "Measure"), self.measuring, self.loaded).clicked() {
                     self.measuring = !self.measuring;
                     self.point = None;
                 }
-                if ui.button(text(zh, "黑 / 白底", "Dark / light")).clicked() {
+                if icons::button(ui, Icon::Sun, text(zh, "黑 / 白底", "Dark / light"), !self.dark, true).clicked() {
                     self.dark = !self.dark;
                     self.dirty = true;
                 }
-                if ui.add_enabled(self.loaded && !self.loading, egui::Button::new(text(zh, "导出 PDF", "Export PDF"))).clicked()
+                if icons::button(ui, Icon::Export, text(zh, "导出 PDF", "Export PDF"), false, self.loaded && !self.loading).clicked()
                     && let Some(p) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name("drawing.pdf").save_file()
                 {
                     self.send(Job::Pdf(self.generation, p));
@@ -292,15 +303,19 @@ impl eframe::App for Viewer {
             });
             ui.add_space(3.0);
             ui.horizontal(|ui| {
-                ui.small(
-                    self.source
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| text(zh, "拖入 DWG / DXF 文件开始看图", "Drop a DWG / DXF drawing to begin").into()),
-                );
+                let title = self
+                    .source
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| text(zh, "拖入 DWG / DXF 文件开始看图", "Drop a DWG / DXF drawing to begin").into());
+                let path = self.source.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+                ui.add(egui::Label::new(egui::RichText::new(title).small().color(theme::TEXT_DIM)).truncate()).on_hover_text(path);
+                ui.separator();
+                ui.small(text(zh, "只读看图", "Read-only preview"));
             });
         });
-        egui::Panel::bottom("status").show(ui, |ui| {
+        egui::Panel::bottom("status").frame(egui::Frame::new().fill(theme::CHROME).inner_margin(6.0)).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 if self.loading {
                     ui.spinner();
@@ -313,10 +328,26 @@ impl eframe::App for Viewer {
                 }
             });
         });
-        egui::Panel::top("notice").show(ui, |ui| {
+        if self.loaded {
+            let previous = self.layout.clone();
+            egui::Panel::bottom("spaces").frame(egui::Frame::new().fill(theme::CHROME_DARK).inner_margin(5.0)).show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(text(zh, "空间", "Space"));
+                    ui.selectable_value(&mut self.layout, String::new(), text(zh, "模型", "Model"));
+                    for layout in &self.layouts {
+                        ui.selectable_value(&mut self.layout, layout.clone(), layout);
+                    }
+                });
+            });
+            if self.layout != previous {
+                self.loading = true;
+                self.send(Job::Space(self.generation, self.layout.clone()));
+            }
+        }
+        egui::Panel::top("notice").frame(egui::Frame::new().fill(theme::CHROME_DARK).inner_margin(6.0)).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.colored_label(
-                    Color32::from_rgb(135, 88, 20),
+                    theme::WARN,
                     text(
                         zh,
                         "二维试用版 · 保留原图 · SHX 字体、特殊对象与三维显示需用浩辰核对",
@@ -333,20 +364,6 @@ impl eframe::App for Viewer {
                         }
                     },
                 );
-            }
-            if self.loaded {
-                let previous = self.layout.clone();
-                ui.horizontal(|ui| {
-                    ui.label(text(zh, "空间", "Space"));
-                    ui.selectable_value(&mut self.layout, String::new(), text(zh, "模型", "Model"));
-                    for l in &self.layouts {
-                        ui.selectable_value(&mut self.layout, l.clone(), l);
-                    }
-                });
-                if self.layout != previous {
-                    self.loading = true;
-                    self.send(Job::Space(self.generation, self.layout.clone()));
-                }
             }
         });
         if self.show_layers {
@@ -366,7 +383,7 @@ impl eframe::App for Viewer {
                 }
             });
         }
-        let bg = if self.dark && self.layout.is_empty() { Color32::from_rgb(25, 31, 39) } else { Color32::from_rgb(250, 250, 248) };
+        let bg = if self.dark && self.layout.is_empty() { theme::CANVAS } else { theme::PAPER };
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(bg)).show(ui, |ui| {
             let rect = ui.available_rect_before_wrap();
             let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
@@ -535,6 +552,9 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 820.0]).with_min_inner_size([760.0, 500.0]).with_drag_and_drop(true),
         ..Default::default()
     };
+    if let Some(icon) = theme::app_icon() {
+        options.viewport = options.viewport.with_icon(icon);
+    }
     #[cfg(windows)]
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup {
         create.instance_descriptor.backends = eframe::wgpu::Backends::from_env().unwrap_or(eframe::wgpu::Backends::DX12);

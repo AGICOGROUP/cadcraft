@@ -733,6 +733,7 @@ dependencies = [
  "cadcraft-geom",
  "cadcraft-io",
  "cadcraft-render",
+ "craft-ui",
  "eframe",
  "egui",
  "image",
@@ -740,6 +741,7 @@ dependencies = [
  "serde_json",
  "sys-locale",
  "tempfile",
+ "winresource",
 ]
 
 [[package]]

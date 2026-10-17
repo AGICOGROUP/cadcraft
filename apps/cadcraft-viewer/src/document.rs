@@ -124,7 +124,8 @@ impl Document {
                 return Err(e);
             }
         }
-        let background = if self.space.is_paper() || !dark { Rgb(250, 250, 248) } else { Rgb(25, 31, 39) };
+        let color = if self.space.is_paper() || !dark { crate::theme::PAPER } else { crate::theme::CANVAS };
+        let background = Rgb(color.r(), color.g(), color.b());
         let image = cadcraft_render::raster::render(&self.list, &view, &RasterOptions { background, ..Default::default() })
             .ok_or("Could not allocate the drawing image.")?;
         if self.cancel.load(Ordering::Relaxed) {
