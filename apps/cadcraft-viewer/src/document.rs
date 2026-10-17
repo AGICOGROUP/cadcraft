@@ -10,6 +10,13 @@ use std::sync::{
 
 pub const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
+#[derive(Clone, Copy, Default)]
+pub struct OpenTimings {
+    pub read_ms: f64,
+    pub parse_ms: f64,
+    pub list_ms: f64,
+}
+
 pub struct Document {
     pub source: PathBuf,
     pub drawing: Drawing,
@@ -17,6 +24,7 @@ pub struct Document {
     pub list: DisplayList,
     pub notes: Vec<String>,
     pub tolerance: f64,
+    pub timings: OpenTimings,
     cancel: Arc<AtomicBool>,
 }
 
@@ -28,6 +36,7 @@ impl Document {
         Self::open_with_cancel(path, Arc::new(AtomicBool::new(false)))
     }
     pub fn open_with_cancel(path: &Path, cancel: Arc<AtomicBool>) -> Result<Self, String> {
+        let read_start = std::time::Instant::now();
         if cancel.load(Ordering::Relaxed) {
             return Err("Superseded request.".into());
         }
@@ -46,7 +55,10 @@ impl Document {
         if bytes.len() as u64 > MAX_FILE_BYTES {
             return Err("File grew beyond the opening limit.".into());
         }
+        let read_ms = read_start.elapsed().as_secs_f64() * 1000.0;
+        let parse_start = std::time::Instant::now();
         let drawing = cadcraft_io::read(&bytes, &path.to_string_lossy()).map_err(|e| e.to_string())?;
+        let parse_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
         if cancel.load(Ordering::Relaxed) {
             return Err("Superseded request.".into());
         }
@@ -68,9 +80,30 @@ impl Document {
         if !shx.is_empty() {
             notes.push(format!("SHX fonts use fallback shapes; text may differ: {}", shx.join(", ")));
         }
-        let mut result = Self { source: path.to_owned(), drawing, space: Space::Model, list: DisplayList::default(), notes, tolerance: 0.01, cancel };
+        let list_start = std::time::Instant::now();
+        let mut result = Self {
+            source: path.to_owned(),
+            drawing,
+            space: Space::Model,
+            list: DisplayList::default(),
+            notes,
+            tolerance: 0.01,
+            timings: OpenTimings { read_ms, parse_ms, list_ms: 0.0 },
+            cancel,
+        };
+        result.reset_tolerance();
         result.rebuild()?;
+        result.timings.list_ms = list_start.elapsed().as_secs_f64() * 1000.0;
         Ok(result)
+    }
+    fn reset_tolerance(&mut self) {
+        let bounds = self.drawing.extents(&self.space);
+        let span = bounds.width().max(bounds.height());
+        // At most half a pixel over a 4096-pixel fitted viewport. Deep zoom refines later.
+        self.tolerance = if !bounds.is_empty() && span.is_finite() && span > 0.0 { (span / 8192.0).max(1e-10) } else { 0.01 };
+    }
+    pub fn check_cancelled(&self) -> Result<(), String> {
+        if self.cancel.load(Ordering::Relaxed) { Err("Superseded request.".into()) } else { Ok(()) }
     }
     pub fn rebuild(&mut self) -> Result<(), String> {
         let list = cadcraft_render::build(
@@ -108,10 +141,12 @@ impl Document {
         } else {
             return Err("Layout does not exist.".into());
         };
+        self.reset_tolerance();
         self.rebuild()?;
         Ok(())
     }
-    pub fn render(&mut self, view: View, dark: bool) -> Result<Vec<u8>, String> {
+    pub fn refine_for_view(&mut self, view: View) -> Result<(), String> {
+        self.check_cancelled()?;
         if !view.scale.is_finite() || view.scale <= 0.0 || !view.center.x.is_finite() || !view.center.y.is_finite() {
             return Err("Invalid view.".into());
         }
@@ -124,6 +159,10 @@ impl Document {
                 return Err(e);
             }
         }
+        Ok(())
+    }
+    pub fn render(&mut self, view: View, dark: bool) -> Result<Vec<u8>, String> {
+        self.refine_for_view(view)?;
         let color = if self.space.is_paper() || !dark { crate::theme::PAPER } else { crate::theme::CANVAS };
         let background = Rgb(color.r(), color.g(), color.b());
         let image = cadcraft_render::raster::render(&self.list, &view, &RasterOptions { background, ..Default::default() })
@@ -160,6 +199,24 @@ mod tests {
     use super::*;
     use cadcraft_doc::{Common, EntityKind, Layout, Line};
     use cadcraft_geom::Vec3;
+
+    #[test]
+    fn large_radius_opening_uses_screen_bounded_curves_and_refines_on_zoom() {
+        let dir = tempfile::tempdir().expect("fresh directory");
+        let path = dir.path().join("large-circle.dxf");
+        let mut drawing = Drawing::new_metric();
+        drawing
+            .add(&Space::Model, Common::default(), EntityKind::Circle(cadcraft_doc::Circle { center: Vec3::ZERO, radius: 1_000_000.0 }))
+            .expect("circle");
+        std::fs::write(&path, cadcraft_io::write(&drawing, "circle.dxf").expect("DXF")).expect("input");
+        let mut d = Document::open(&path).expect("open");
+        let initial = d.list.verts.len();
+        assert!(initial < 1024, "opening over-tessellates: {initial} vertices");
+        let before = d.tolerance;
+        d.render(View { center: cadcraft_geom::Vec2::ZERO, scale: 0.1, width: 800, height: 600 }, true).expect("zoom");
+        assert!(d.tolerance < before, "zoom refines the initial approximation");
+        assert!(d.tolerance * 0.1 <= 0.5);
+    }
 
     fn fixture() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("temporary test folder");

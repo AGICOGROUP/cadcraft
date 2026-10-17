@@ -16,6 +16,7 @@ pub enum Job {
     Layers(u64, Vec<(String, bool)>),
     Space(u64, String),
     Render(u64, View, bool),
+    Mesh(u64, View, bool),
     Pdf(u64, PathBuf),
 }
 pub struct Task {
@@ -28,17 +29,19 @@ pub struct Meta {
     pub layouts: Vec<String>,
     pub notes: Vec<String>,
     pub entities: usize,
+    pub timings: crate::document::OpenTimings,
 }
 pub enum Event {
     Loaded(u64, Meta, f64),
     Changed(u64, Bounds2, bool),
     Image(u64, View, Vec<u8>, f64),
+    Mesh(u64, Box<crate::gpu_view::Frame>, f64),
     Saved(u64, PathBuf),
     Error(u64, String),
     Aborted(u64),
 }
 
-pub fn spawn(ctx: egui::Context) -> (Sender<Task>, Receiver<Event>, Arc<AtomicBool>) {
+pub fn spawn(ctx: egui::Context, device: Option<egui_wgpu::wgpu::Device>) -> (Sender<Task>, Receiver<Event>, Arc<AtomicBool>) {
     let (tx, rx) = mpsc::channel::<Task>();
     let (events, result) = mpsc::channel();
     let initial = Arc::new(AtomicBool::new(false));
@@ -51,7 +54,7 @@ pub fn spawn(ctx: egui::Context) -> (Sender<Task>, Receiver<Event>, Arc<AtomicBo
             // Tokens are immutable per request group: the worker never clears a
             // cancellation signal. Explicit exports receive independent tokens.
             let id = match &task.job {
-                Job::Open(id, _) | Job::Layers(id, ..) | Job::Space(id, _) | Job::Render(id, ..) | Job::Pdf(id, _) => *id,
+                Job::Open(id, _) | Job::Layers(id, ..) | Job::Space(id, _) | Job::Render(id, ..) | Job::Mesh(id, ..) | Job::Pdf(id, _) => *id,
             };
             if task.cancel.load(Ordering::Relaxed) && !matches!(task.job, Job::Layers(..)) {
                 let _ = events.send(Event::Aborted(id));
@@ -79,6 +82,7 @@ pub fn spawn(ctx: egui::Context) -> (Sender<Task>, Receiver<Event>, Arc<AtomicBo
                             layouts: d.drawing.layouts.iter().map(|l| l.name.clone()).collect(),
                             notes: d.notes.clone(),
                             entities: d.drawing.entity_count(),
+                            timings: d.timings,
                         };
                         doc = Some(d);
                         active = id;
@@ -100,6 +104,10 @@ pub fn spawn(ctx: egui::Context) -> (Sender<Task>, Receiver<Event>, Arc<AtomicBo
                             Job::Render(id, view, dark) => {
                                 let pixels = d.render(view, dark)?;
                                 Ok(Event::Image(id, view, pixels, start.elapsed().as_secs_f64() * 1000.0))
+                            }
+                            Job::Mesh(id, view, dark) => {
+                                let frame = crate::gpu_view::build(d, view, dark, device.as_ref())?;
+                                Ok(Event::Mesh(id, Box::new(frame), start.elapsed().as_secs_f64() * 1000.0))
                             }
                             Job::Pdf(id, path) => {
                                 d.export_pdf(&path)?;
@@ -153,7 +161,7 @@ mod tests {
     fn cancelled_requests_never_reset_their_token_or_block_the_next_open() {
         let dir = tempfile::tempdir().expect("temp");
         let p = input(dir.path(), "new.dxf");
-        let (tx, rx, _) = spawn(egui::Context::default());
+        let (tx, rx, _) = spawn(egui::Context::default(), None);
         let cancelled = Arc::new(AtomicBool::new(true));
         tx.send(Task { job: Job::Open(1, dir.path().join("does-not-exist.dwg")), cancel: cancelled.clone() }).expect("queue");
         tx.send(Task { job: Job::Open(2, p), cancel: token() }).expect("queue");
@@ -167,7 +175,7 @@ mod tests {
         let a = input(dir.path(), "a.dxf");
         let b = input(dir.path(), "b.dxf");
         let pdf = dir.path().join("export.pdf");
-        let (tx, rx, _) = spawn(egui::Context::default());
+        let (tx, rx, _) = spawn(egui::Context::default(), None);
         let a_token = token();
         tx.send(Task { job: Job::Open(1, a), cancel: a_token.clone() }).expect("open a");
         assert!(matches!(rx.recv_timeout(Duration::from_secs(15)).expect("opened a"), Event::Loaded(1, ..)));
@@ -183,7 +191,7 @@ mod tests {
     fn cancelling_a_layer_rebuild_still_applies_visibility_before_navigation() {
         let dir = tempfile::tempdir().expect("temp");
         let path = input(dir.path(), "layers.dxf");
-        let (tx, rx, _) = spawn(egui::Context::default());
+        let (tx, rx, _) = spawn(egui::Context::default(), None);
         tx.send(Task { job: Job::Open(1, path), cancel: token() }).expect("open");
         assert!(matches!(rx.recv_timeout(Duration::from_secs(15)).expect("loaded"), Event::Loaded(1, ..)));
         tx.send(Task { job: Job::Layers(1, vec![("DETAIL".into(), false)]), cancel: Arc::new(AtomicBool::new(true)) }).expect("layer");

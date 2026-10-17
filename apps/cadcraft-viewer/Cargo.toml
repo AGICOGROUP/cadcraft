@@ -14,9 +14,11 @@ cadcraft-io.workspace = true
 cadcraft-doc.workspace = true
 cadcraft-geom.workspace = true
 cadcraft-render.workspace = true
+cadcraft-render-wgpu.workspace = true
 cadcraft-color.workspace = true
 eframe = { workspace = true, features = ["wgpu", "default_fonts", "accesskit", "wayland", "x11"] }
 egui.workspace = true
+egui-wgpu.workspace = true
 rfd.workspace = true
 serde_json.workspace = true
 image.workspace = true

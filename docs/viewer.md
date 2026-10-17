@@ -40,18 +40,32 @@ are opened for reading only.
 
 ## Performance and limits
 
-Parsing, display-list builds, CPU rasterization and PDF output run on a worker
-thread. A cached display list is reused for pan/zoom; curves refine when their
-cached chord error exceeds half a raster pixel. While a new raster is pending,
-the previous image follows the camera immediately. Only one raster request is
-in flight, and the UI retains the latest requested view. Layer changes are
-batched. Superseded operations use per-request cancellation tokens; DWG parsing
-itself is not yet interruptible. Explicit PDF exports keep their queue position.
+The viewer defaults to GPU drawing on a hardware adapter, using the editor's
+backend extracted into `cadcraft-render-wgpu`. This shared L5 adapter has no
+editing-engine dependency; the editor re-exports its existing API. The viewer
+uses four-sample antialiasing. The GPU checkbox/status identifies the active
+drawing backend; its tooltip names the actual adapter. Uncheck it or launch with
+`--cpu` to use CPU rasterization. Reported drawing errors disable GPU drawing;
+complete device loss may still require restarting the app.
 
-Raster dimensions are bounded to 4096 pixels per side with a uniform density;
-larger/high-DPI windows still show the whole viewport, with lower sampling
-density. This first frontend uses the existing CPU rasterizer, not the editor's
-GPU geometry backend. Do not infer a speed improvement for every drawing.
+Parsing, display-list builds, GPU mesh preparation/upload and PDF output run on
+the worker. Once geometry is uploaded, ordinary pan/zoom only updates view
+uniforms. A new mesh is requested when layers, space, background, curve precision
+or the vertex-origin precision budget changes. The existing mesh stays visible
+while a finer one is prepared. Primitive-order groups preserve transparent fills
+and wipeouts; XLINE/RAY extend in the shader inside those same groups.
+
+Initial curve tolerance follows approximate drawing extents for a 4096-pixel
+fit, rather than a fixed tiny drawing-unit error. Deep zoom refines curves when
+their chord error exceeds half a pixel. File parsing remains CPU work: GPU
+drawing does not promise faster parsing or better format compatibility.
+
+In CPU mode a cached display list is reused; only one raster request is in flight,
+and the latest desired view is retained while the previous image follows the
+camera. CPU raster dimensions are bounded uniformly to 4096 pixels per side.
+Layer changes are batched; superseded operations use per-request cancellation
+tokens. DWG parsing itself is not yet interruptible. Explicit PDF exports keep
+their queue position. Do not infer a speed improvement for every drawing.
 
 This is a **2D preview**, with the same reader/font/entity limitations as the
 current CADCraft core. SHX/big fonts, custom objects and 3D appearance need
@@ -70,20 +84,26 @@ cargo build --release -p cadcraft-viewer
 Tests generate fresh drawings in temporary directories. They cover cursor-fixed
 zoom at large world coordinates, high-DPI coverage, pan, layer visibility and
 layout bounds, malformed/cancelled requests, preserving input bytes, output
-hard links, and preserving an explicit PDF export while another drawing opens.
+hard links, preserving an explicit PDF export while another drawing opens,
+screen-bounded initial curves, deep-zoom mesh reuse, infinite lines and ordered fills.
 
 For local diagnostics (use a **new** output directory each time):
 
 ```sh
 cadcraft-viewer --probe drawing.dxf new-output-directory
 cadcraft-viewer --capture new-window.png --lang en drawing.dxf
+cadcraft-viewer --capture new-gpu-benchmark.png --benchmark drawing.dxf
+cadcraft-viewer --capture new-cpu-benchmark.png --benchmark --cpu drawing.dxf
 ```
 
 `--probe` writes a drawing PNG, PDF and JSON timings through the same reader and
 rasterizer as the GUI. It is not a GUI startup benchmark or an independent
 rendering oracle. `--capture` uses egui's screenshot event and closes its test
-window afterward. If no native frame is presented, an error sidecar is written
-without replacing existing files. All diagnostic outputs refuse replacement.
+window afterward. A JSON sidecar reports the actual adapter/backend, stage timings,
+first-view latency and GPU mesh/CPU raster job counts. `--benchmark` additionally
+performs 30 settled pan/zoom updates. Its wall-clock latency includes scheduling
+and presentation; it is not a GPU execution timestamp. If no native frame is
+presented, an error sidecar is written. All diagnostic outputs refuse replacement.
 
 The native app has been developed and tested on Windows; other supported desktop
 platforms require their own runtime acceptance. No additional proprietary assets,

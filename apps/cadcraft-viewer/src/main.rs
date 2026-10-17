@@ -2,13 +2,16 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::todo, clippy::unimplemented, clippy::unreachable)]
 mod camera;
+mod diagnostics;
 mod document;
+mod gpu_view;
 mod icons;
 mod theme;
 mod worker;
 
 use cadcraft_geom::{Bounds2, Vec2};
 use cadcraft_render::raster::View;
+use cadcraft_render_wgpu as gpu;
 use camera::Camera;
 use egui::{Color32, Pos2, Rect, Vec2 as ScreenVec};
 use icons::Icon;
@@ -57,10 +60,26 @@ struct Viewer {
     capture_sent: bool,
     capture_since: Instant,
     app_mark: Option<egui::TextureHandle>,
+    use_gpu: bool,
+    gpu_available: bool,
+    adapter: String,
+    gpu_faults: std::sync::Arc<gpu::GpuFaults>,
+    gpu_slot: gpu::MeshSlot,
+    gpu_cache: Option<gpu_view::Cache>,
+    gpu_key: u64,
+    diagnostics: diagnostics::Diagnostics,
 }
 
 impl Viewer {
-    fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>, capture: Option<PathBuf>, language: Option<bool>) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        path: Option<PathBuf>,
+        capture: Option<PathBuf>,
+        language: Option<bool>,
+        cpu: bool,
+        benchmark: bool,
+        started: Instant,
+    ) -> Self {
         let mut fonts = egui::FontDefinitions::default();
         #[cfg(windows)]
         for path in ["C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/msjh.ttc", "C:/Windows/Fonts/simhei.ttf"] {
@@ -79,7 +98,19 @@ impl Viewer {
                 egui::TextureOptions::LINEAR,
             )
         });
-        let (jobs, events, cancel) = worker::spawn(cc.egui_ctx.clone());
+        let gpu_faults = std::sync::Arc::new(gpu::GpuFaults::default());
+        let mut adapter = "Unavailable".to_owned();
+        let device = cc.wgpu_render_state.as_ref().and_then(|rs| {
+            let info = rs.adapter.get_info();
+            adapter = format!("{} ({:?}, {:?})", info.name, info.backend, info.device_type);
+            if cpu || info.device_type == egui_wgpu::wgpu::DeviceType::Cpu {
+                return None;
+            }
+            let installed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gpu::install_with_samples(rs, &gpu_faults, None, 4)));
+            (installed.is_ok() && gpu_faults.take().is_none()).then(|| rs.device.clone())
+        });
+        let gpu_available = device.is_some();
+        let (jobs, events, cancel) = worker::spawn(cc.egui_ctx.clone(), device);
         let zh = language.unwrap_or_else(|| {
             std::env::var("CADCRAFT_VIEWER_LANGUAGE")
                 .map(|v| v.starts_with("zh"))
@@ -119,6 +150,14 @@ impl Viewer {
             capture_sent: false,
             capture_since: Instant::now(),
             app_mark,
+            use_gpu: gpu_available,
+            gpu_available,
+            adapter,
+            gpu_faults,
+            gpu_slot: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            gpu_cache: None,
+            gpu_key: 0,
+            diagnostics: diagnostics::Diagnostics::new(started, benchmark),
         };
         if let Some(path) = path {
             app.open(path);
@@ -126,6 +165,11 @@ impl Viewer {
         app
     }
     fn send(&mut self, job: Job) {
+        match &job {
+            Job::Render(..) => self.diagnostics.raster_jobs += 1,
+            Job::Mesh(..) => self.diagnostics.mesh_jobs += 1,
+            _ => {}
+        }
         if matches!(job, Job::Open(..) | Job::Space(..)) {
             self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             self.cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -138,6 +182,8 @@ impl Viewer {
         }
     }
     fn open(&mut self, path: PathBuf) {
+        self.diagnostics.opening();
+        self.gpu_cache = None;
         self.generation = self.generation.wrapping_add(1);
         self.loading = true;
         self.loaded = false;
@@ -164,6 +210,9 @@ impl Viewer {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 Event::Loaded(id, m, ms) if id == self.generation => {
+                    self.diagnostics.read_ms = m.timings.read_ms;
+                    self.diagnostics.parse_ms = m.timings.parse_ms;
+                    self.diagnostics.list_ms = m.timings.list_ms;
                     self.bounds = m.bounds;
                     self.layers = m.layers;
                     self.layouts = m.layouts;
@@ -181,6 +230,7 @@ impl Viewer {
                     }
                 }
                 Event::Changed(id, b, refit) if id == self.generation => {
+                    self.gpu_cache = None;
                     self.bounds = b;
                     self.dirty = true;
                     if refit {
@@ -199,6 +249,19 @@ impl Viewer {
                     self.image_view = Some(v);
                     self.inflight = false;
                     self.status = format!("{} · {:.0} ms {}", text(self.zh, "只读", "Read only"), ms, text(self.zh, "绘制", "render"));
+                }
+                Event::Mesh(id, frame, ms) if id == self.generation => {
+                    self.inflight = false;
+                    if self.use_gpu {
+                        let frame = *frame;
+                        if let Ok(mut slot) = self.gpu_slot.lock() {
+                            *slot = Some(frame.data);
+                        }
+                        self.gpu_cache = Some(frame.cache);
+                        self.gpu_key = self.gpu_key.wrapping_add(1);
+                        self.diagnostics.mesh_prepare_ms += ms;
+                        self.status = format!("{} · GPU · {:.0} ms", text(self.zh, "只读", "Read only"), ms);
+                    }
                 }
                 Event::Aborted(id) if id == self.generation => {
                     self.inflight = false;
@@ -225,10 +288,19 @@ impl Viewer {
                 if let Err(e) = save_png(&path, &bytes, image.width() as u32, image.height() as u32) {
                     self.status = e.to_string();
                 }
+                match serde_json::to_vec_pretty(&self.diagnostics.report(self.use_gpu, &self.adapter)) {
+                    Ok(bytes) => {
+                        if let Err(e) = document::write_new(&path.with_extension("json"), &bytes) {
+                            self.status = e;
+                        }
+                    }
+                    Err(e) => self.status = e.to_string(),
+                }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
-        if self.capture.is_some() && self.texture.is_some() && !self.inflight && !self.dirty && !self.capture_sent {
+        let ready = if self.use_gpu { self.gpu_cache.is_some() && self.diagnostics.gpu_frames > 0 } else { self.texture.is_some() };
+        if self.capture.is_some() && ready && !self.inflight && !self.dirty && !self.capture_sent && self.diagnostics.finished() {
             self.capture_sent = true;
             self.capture_since = Instant::now();
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
@@ -245,6 +317,26 @@ impl Viewer {
 impl eframe::App for Viewer {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain(ctx);
+        if let Some(fault) = self.gpu_faults.take() {
+            self.use_gpu = false;
+            self.gpu_available = false;
+            self.gpu_cache = None;
+            self.inflight = false;
+            self.dirty = true;
+            self.notes.push(format!("GPU drawing disabled; using CPU raster: {}", fault.message));
+            if self.loaded {
+                self.loading = true;
+                self.send(Job::Space(self.generation, self.layout.clone()));
+            }
+        }
+        let ready = self.loaded
+            && !self.loading
+            && !self.inflight
+            && !self.dirty
+            && if self.use_gpu { self.gpu_cache.is_some() && self.diagnostics.gpu_frames > 0 } else { self.texture.is_some() };
+        if ready && self.diagnostics.ready(&mut self.camera) {
+            self.dirty = true;
+        }
         self.save_capture(ctx);
         for f in ctx.input(|i| i.raw.dropped_files.clone()) {
             let p = f.path();
@@ -262,7 +354,9 @@ impl eframe::App for Viewer {
             self.measuring = false;
             self.point = None;
         }
-        if self.loading || self.inflight || self.capture.is_some() {
+        if self.capture.is_some() && self.diagnostics.benchmark && !self.capture_sent {
+            ctx.request_repaint();
+        } else if self.loading || self.inflight || self.capture.is_some() {
             ctx.request_repaint_after(Duration::from_millis(40));
         }
     }
@@ -300,6 +394,15 @@ impl eframe::App for Viewer {
                 if ui.button(if zh { "English" } else { "中文" }).clicked() {
                     self.zh = !self.zh;
                 }
+                if ui
+                    .add_enabled(self.gpu_available && !self.inflight && !self.loading, egui::Checkbox::new(&mut self.use_gpu, "GPU"))
+                    .on_hover_text(&self.adapter)
+                    .changed()
+                {
+                    self.gpu_cache = None;
+                    self.desired = None;
+                    self.dirty = true;
+                }
             });
             ui.add_space(3.0);
             ui.horizontal(|ui| {
@@ -321,6 +424,8 @@ impl eframe::App for Viewer {
                     ui.spinner();
                 }
                 ui.small(&self.status);
+                ui.separator();
+                ui.small(if self.use_gpu { "GPU" } else { "CPU" }).on_hover_text(&self.adapter);
                 ui.separator();
                 ui.small(text(zh, "滚轮缩放 · 按住左键或中键平移 · 双击全图", "Wheel zoom · Drag to pan · Double-click to fit"));
                 if let Some(d) = self.distance {
@@ -387,7 +492,12 @@ impl eframe::App for Viewer {
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(bg)).show(ui, |ui| {
             let rect = ui.available_rect_before_wrap();
             let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-            let (w, h, ppp) = camera::raster_size(rect.width(), rect.height(), ui.ctx().pixels_per_point());
+            let (w, h, ppp) = if self.use_gpu {
+                let ppp = ui.ctx().pixels_per_point();
+                ((rect.width() * ppp).ceil().clamp(1.0, 65536.0) as u32, (rect.height() * ppp).ceil().clamp(1.0, 65536.0) as u32, ppp)
+            } else {
+                camera::raster_size(rect.width(), rect.height(), ui.ctx().pixels_per_point())
+            };
             let size = [w, h];
             if !self.fit && self.density != ppp {
                 self.camera.scale *= f64::from(ppp / self.density);
@@ -441,13 +551,40 @@ impl eframe::App for Viewer {
                     self.desired = Some(view);
                     self.dirty = true;
                 }
-                // One raster request at a time; interaction keeps only the latest desired view.
+                // Cached GPU geometry only needs a new view uniform while navigating.
                 if self.dirty && !self.inflight {
                     self.dirty = false;
-                    self.inflight = true;
-                    self.send(Job::Render(self.generation, view, self.dark));
+                    if !self.use_gpu || self.gpu_cache.as_ref().is_none_or(|cache| !cache.serves(view, self.dark)) {
+                        self.inflight = true;
+                        self.send(if self.use_gpu {
+                            Job::Mesh(self.generation, view, self.dark)
+                        } else {
+                            Job::Render(self.generation, view, self.dark)
+                        });
+                    }
                 }
-                if let (Some(texture), Some(old)) = (&self.texture, self.image_view) {
+                if self.use_gpu
+                    && let Some(cache) = &self.gpu_cache
+                {
+                    let center = rect.center();
+                    ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                        rect,
+                        gpu::CanvasCallback {
+                            key: self.gpu_key,
+                            slot: self.gpu_slot.clone(),
+                            offset: [(cache.origin.x - view.center.x) as f32, (cache.origin.y - view.center.y) as f32],
+                            scale: (view.scale / f64::from(ppp)) as f32,
+                            center: [center.x, center.y],
+                            layer: gpu::LAYER_DRAWING,
+                            xform: gpu::IDENTITY_XFORM,
+                            dash: 0.0,
+                            stencil: gpu::Stencil::Off,
+                        },
+                    ));
+                    self.diagnostics.gpu_frames += 1;
+                } else if !self.use_gpu
+                    && let (Some(texture), Some(old)) = (&self.texture, self.image_view)
+                {
                     let ratio = self.camera.scale / old.scale;
                     let center = rect.center()
                         + ScreenVec::new(
@@ -522,10 +659,13 @@ fn probe(path: PathBuf, output: PathBuf) -> Result<(), String> {
 }
 
 fn main() -> eframe::Result {
+    let started = Instant::now();
     let mut args = std::env::args().skip(1);
     let mut path = None;
     let mut capture = None;
     let mut language = None;
+    let mut cpu = false;
+    let mut benchmark = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--probe" => {
@@ -540,6 +680,8 @@ fn main() -> eframe::Result {
                 return Ok(());
             }
             "--capture" => capture = args.next().map(PathBuf::from),
+            "--cpu" => cpu = true,
+            "--benchmark" => benchmark = true,
             "--lang" => language = args.next().map(|s| s.starts_with("zh")),
             "--version" => {
                 println!("CADCraft Viewer {} (read-only)", env!("CARGO_PKG_VERSION"));
@@ -549,6 +691,7 @@ fn main() -> eframe::Result {
         }
     }
     let mut options = eframe::NativeOptions {
+        multisampling: 4,
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 820.0]).with_min_inner_size([760.0, 500.0]).with_drag_and_drop(true),
         ..Default::default()
     };
@@ -560,5 +703,9 @@ fn main() -> eframe::Result {
         create.instance_descriptor.backends = eframe::wgpu::Backends::from_env().unwrap_or(eframe::wgpu::Backends::DX12);
         create.instance_descriptor.backend_options.dx12.shader_compiler = eframe::wgpu::Dx12Compiler::Fxc;
     }
-    eframe::run_native("CADCraft Viewer — 清阅 CAD", options, Box::new(move |cc| Ok(Box::new(Viewer::new(cc, path, capture, language)))))
+    eframe::run_native(
+        "CADCraft Viewer — 清阅 CAD",
+        options,
+        Box::new(move |cc| Ok(Box::new(Viewer::new(cc, path, capture, language, cpu, benchmark, started)))),
+    )
 }
