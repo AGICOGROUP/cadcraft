@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>CADCraft Viewer — drawing sheet and eye</title>
+  <desc>Original viewer artwork by Dennis-pan (AGICOGROUP), licensed MIT OR Apache-2.0.</desc>
+  <defs>
+    <clipPath id="tile"><rect x="4" y="4" width="248" height="248" rx="52"/></clipPath>
+  </defs>
+  <rect x="4" y="4" width="248" height="248" rx="52" fill="#15a6c2"/>
+  <g clip-path="url(#tile)" fill="none" stroke="#97d7df" stroke-width="1.5" opacity=".65">
+    <path d="M32 16V240M64 16V240M96 16V240M128 16V240M160 16V240M192 16V240M224 16V240M16 32H240M16 64H240M16 96H240M16 128H240M16 160H240M16 192H240M16 224H240"/>
+  </g>
+  <g stroke="#071e23" stroke-width="8" stroke-linejoin="round">
+    <path d="M65 30H151L191 70V220H65Z" fill="#f6efdf"/>
+    <path d="M151 30V70H191" fill="#97d7df"/>
+  </g>
+  <path d="M85 64H125M85 84H112M85 199H153" fill="none" stroke="#071e23" stroke-width="5" stroke-linecap="round"/>
+  <path d="M30 143Q128 50 226 143Q128 236 30 143Z" fill="#f6efdf" stroke="#071e23" stroke-width="9" stroke-linejoin="round"/>
+  <circle cx="128" cy="143" r="32" fill="#15a6c2" stroke="#071e23" stroke-width="8"/>
+  <circle cx="128" cy="143" r="13" fill="#071e23"/>
+  <circle cx="143" cy="125" r="9" fill="#ee8734"/>
+</svg>

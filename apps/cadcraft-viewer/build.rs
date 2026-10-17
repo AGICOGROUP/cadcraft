@@ -1,12 +1,12 @@
-//! Embed the same openly licensed CADCraft app icon used by the desktop editor.
+//! Embed the original viewer icon, distinct from the CADCraft editor icon.
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../../assets/app-icon/cadcraft.ico");
+    println!("cargo:rerun-if-changed=../../assets/viewer-icon/viewer.ico");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
     let mut resource = winresource::WindowsResource::new();
-    resource.set_icon("../../assets/app-icon/cadcraft.ico");
+    resource.set_icon("../../assets/viewer-icon/viewer.ico");
     resource
         .set("ProductName", "CADCraft Viewer")
         .set("FileDescription", "CADCraft read-only drawing viewer (community preview)")

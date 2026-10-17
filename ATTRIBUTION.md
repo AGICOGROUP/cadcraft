@@ -52,6 +52,14 @@ Generated-in-code assets are original and have no file to list:
 | `docs/brand/artcraft-mark.png` | ArtCraft Team | storytold/craftrules `assets/brand/` | ArtCraft brand terms (`docs/brand/LICENSE-brand.txt`) | Trademark, not open source |
 | `docs/brand/artcraft-mark.svg` | ArtCraft Team | storytold/craftrules `assets/brand/` | ArtCraft brand terms (`docs/brand/LICENSE-brand.txt`) | Trademark, not open source |
 
+## Viewer artwork
+
+| Asset | Author | Source | Licence | Notes |
+|---|---|---|---|---|
+| `assets/viewer-icon/viewer.svg` | Dennis-pan (@AGICOGROUP, AI-assisted) | Original drawing-sheet and eye artwork for CADCraft Viewer | MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`) | Distinct from the editor icon; no third-party artwork |
+| `assets/viewer-icon/viewer-256.png` | Dennis-pan (@AGICOGROUP, AI-assisted) | Raster export of `assets/viewer-icon/viewer.svg` | MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`) | Window and toolbar icon |
+| `assets/viewer-icon/viewer.ico` | Dennis-pan (@AGICOGROUP, AI-assisted) | PNG exports of `assets/viewer-icon/viewer.svg`, sizes 16/20/24/32/40/48/64/128/256 | MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`) | Windows executable and shortcut icon |
+
 ## Interface translations
 
 | Asset | Author | Source | Licence | Notes |

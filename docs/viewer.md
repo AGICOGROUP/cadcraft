@@ -18,8 +18,11 @@ ships copies of those fonts.
 The chrome follows CADCraft's slate palette, typography, compact controls and
 24-pixel line-icon geometry. Toolbar controls use the same `craft-ui` icon-button
 component as the editor; no editing engine is loaded. The window, executable and
-desktop shortcut use the existing MIT/Apache-licensed CADCraft application icon
-unchanged. Restricted ArtCraft marks from `docs/brand` are not bundled.
+desktop shortcut use original MIT/Apache-licensed viewer artwork from
+`assets/viewer-icon`: a drawing sheet and eye, sharing the family palette while
+remaining visually distinct from the editor's drafting-triangle icon. The SVG is
+the editable source; PNG/ICO exports include sizes down to 16 pixels. Restricted
+ArtCraft marks from `docs/brand` are not bundled.
 
 ## Reviewing drawings
 
